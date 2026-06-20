@@ -16,22 +16,11 @@ Try this experiment once it's running:
      restart, and try again -> it will have no idea, even mid-conversation.
 """
 
-import json
-import os
-
 import ollama
 
+import debug_utils
+
 MODEL = "qwen3:8b"  # change to whatever you have pulled, e.g. "llama3.1:8b"
-
-# Flip on by running:  DEBUG=1 uv run python 01_chat_loop.py
-DEBUG = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
-
-
-def _dump(label, payload):
-    """Pretty-print a request/response payload when DEBUG is enabled."""
-    print(f"\n----- {label} -----")
-    print(json.dumps(payload, indent=2, default=str, ensure_ascii=False))
-    print("-" * (12 + len(label)) + "\n")
 
 
 def main():
@@ -42,8 +31,7 @@ def main():
     ]
 
     print(f"Chat loop running with model={MODEL}. Type 'exit' to quit.")
-    if DEBUG:
-        print("DEBUG mode ON: printing full request/response payloads.")
+    debug_utils.banner()
     print()
 
     while True:
@@ -55,15 +43,11 @@ def main():
         messages.append({"role": "user", "content": user_input})
 
         # 2. Send the WHOLE history to the model. Every. Single. Time.
-        if DEBUG:
-            _dump("REQUEST", {"model": MODEL, "messages": messages})
+        debug_utils.dump_request(MODEL, messages)
 
         response = ollama.chat(model=MODEL, messages=messages)
 
-        if DEBUG:
-            # response is an ollama ChatResponse object; dict() shows everything
-            # the server returned (timings, token counts, the message, etc.).
-            _dump("RESPONSE", dict(response))
+        debug_utils.dump_response(response)
 
         assistant_message = response["message"]["content"]
         print(f"Assistant: {assistant_message}\n")

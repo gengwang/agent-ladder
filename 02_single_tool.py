@@ -24,6 +24,8 @@ import json
 import os
 import ollama
 
+import debug_utils
+
 MODEL = "qwen3:8b"
 
 
@@ -78,7 +80,9 @@ def main():
         }
     ]
 
-    print(f"Single-tool agent running with model={MODEL}. Type 'exit' to quit.\n")
+    print(f"Single-tool agent running with model={MODEL}. Type 'exit' to quit.")
+    debug_utils.banner()
+    print()
 
     while True:
         user_input = input("You: ").strip()
@@ -88,7 +92,9 @@ def main():
         messages.append({"role": "user", "content": user_input})
 
         # First call: give the model the chance to request a tool call.
+        debug_utils.dump_request(MODEL, messages, tools=TOOLS)
         response = ollama.chat(model=MODEL, messages=messages, tools=TOOLS)
+        debug_utils.dump_response(response)
         message = response["message"]
 
         tool_calls = message.get("tool_calls")
@@ -106,10 +112,13 @@ def main():
                 if isinstance(fn_args, str):
                     fn_args = json.loads(fn_args)
 
-                print(f"  [tool call] {fn_name}({fn_args})")
-
                 fn = AVAILABLE_FUNCTIONS.get(fn_name)
                 result = fn(**fn_args) if fn else f"ERROR: unknown tool {fn_name}"
+
+                # The model only ASKED for this tool; OUR code actually runs it.
+                # In debug mode this prints as its own labeled block so the flow
+                # reads: RESPONSE (asks) -> TOOL EXECUTION (we run) -> REQUEST.
+                debug_utils.tool_call(fn_name, fn_args, result)
 
                 # Feed the tool's result back in as a 'tool' role message.
                 messages.append(
@@ -121,7 +130,9 @@ def main():
 
             # Second call: now the model has the tool result and can
             # form its actual answer to the user.
+            debug_utils.dump_request(MODEL, messages, tools=TOOLS)
             response = ollama.chat(model=MODEL, messages=messages, tools=TOOLS)
+            debug_utils.dump_response(response)
             message = response["message"]
 
         assistant_text = message.get("content", "")
