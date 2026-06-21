@@ -24,9 +24,10 @@ import json
 import os
 import ollama
 
+import cli_utils
 import debug_utils
 
-MODEL = "qwen3:8b"
+MODEL = os.environ.get("MODEL", "qwen3:8b")
 
 
 # ---- Step A: the actual Python function the tool will run ----
@@ -86,7 +87,7 @@ def main():
 
     while True:
         user_input = input("You: ").strip()
-        if user_input.lower() in ("exit", "quit"):
+        if cli_utils.is_exit_command(user_input):
             break
 
         messages.append({"role": "user", "content": user_input})

@@ -14,6 +14,9 @@ Enable it per run with an environment variable:
 
 Accepted truthy values: 1, true, yes (case-insensitive).
 
+Optional `.env` in the project root is loaded on import (via python-dotenv).
+Inline env vars still win — `MODEL=llama3.1:8b uv run ...` overrides `.env`.
+
 In debug mode you'll see the full round trip as labeled blocks:
 
     REQUEST            -> what we send to the model
@@ -24,6 +27,12 @@ In debug mode you'll see the full round trip as labeled blocks:
 
 import json
 import os
+
+from dotenv import load_dotenv
+
+# Load optional .env from the project root. Does not override vars already set
+# in the shell (so MODEL=... uv run ... still works).
+load_dotenv()
 
 # Single source of truth for whether debug output is on.
 DEBUG = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")

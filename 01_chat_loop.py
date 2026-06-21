@@ -16,11 +16,14 @@ Try this experiment once it's running:
      restart, and try again -> it will have no idea, even mid-conversation.
 """
 
+import os
+
 import ollama
 
+import cli_utils
 import debug_utils
 
-MODEL = "qwen3:8b"  # change to whatever you have pulled, e.g. "llama3.1:8b"
+MODEL = os.environ.get("MODEL", "qwen3:8b")
 
 
 def main():
@@ -36,7 +39,7 @@ def main():
 
     while True:
         user_input = input("You: ").strip()
-        if user_input.lower() in ("exit", "quit", "/bye"):
+        if cli_utils.is_exit_command(user_input):
             break
 
         # 1. Append the user's message to the running history

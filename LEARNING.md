@@ -1,74 +1,23 @@
 # LEARNING.md
 
-Notes captured while building and exploring the `agent-ladder` scripts. This is
-a study companion to the code — it records the *concepts* behind what the
-scripts demonstrate, written as a running Q&A with myself.
+A concept companion to the `agent-ladder` scripts. It explains the **LLM and
+agent-harness ideas** behind what each rung demonstrates. For setup, debug
+mode, and how to run scripts, see [`README.md`](./README.md).
 
 ## Table of contents
 
-1. [Environment & tooling (uv)](#1-environment--tooling-uv)
-2. [Debug mode](#2-debug-mode)
-3. [Reading Ollama's response metadata](#3-reading-ollamas-response-metadata)
-4. [Forward pass, prefill, and decode](#4-forward-pass-prefill-and-decode)
-5. [Statelessness: who resends the history?](#5-statelessness-who-resends-the-history)
-6. [The tool-calling protocol](#6-the-tool-calling-protocol)
-7. [Tool calls across LLM providers](#7-tool-calls-across-llm-providers)
+1. [Reading Ollama's response metadata](#1-reading-ollamas-response-metadata)
+2. [Forward pass, prefill, and decode](#2-forward-pass-prefill-and-decode)
+3. [Statelessness: who resends the history?](#3-statelessness-who-resends-the-history)
+4. [The tool-calling protocol](#4-the-tool-calling-protocol)
+5. [Tool calls across LLM providers](#5-tool-calls-across-llm-providers)
+6. [Tool selection / routing with many tools](#6-tool-selection--routing-with-many-tools)
+7. [Where tools run: custom vs built-in](#7-where-tools-run-custom-vs-built-in)
+8. [The agent loop: looping until done](#8-the-agent-loop-looping-until-done)
 
 ---
 
-## 1. Environment & tooling (uv)
-
-[uv](https://docs.astral.sh/uv/) is to Python roughly what `npm` + `nvm` +
-`venv` are to Node, combined into one fast tool.
-
-| Concept | npm | uv |
-|---|---|---|
-| Manifest | `package.json` | `pyproject.toml` |
-| Lockfile | `package-lock.json` | `uv.lock` |
-| Deps folder | `node_modules/` | `.venv/` |
-| Add a dep | `npm install <pkg>` | `uv add <pkg>` |
-| Run | `npm run <script>` | `uv run <cmd>` |
-
-`uv init` is like `npm init` — it scaffolds a project — but it also pins a
-Python version and manages the virtual environment for you (npm assumes Node is
-already installed).
-
-Install deps and run a script:
-
-```bash
-uv venv
-uv pip install -r requirements.txt
-uv run python 01_chat_loop.py   # uv run uses .venv automatically
-```
-
----
-
-## 2. Debug mode
-
-All scripts share `debug_utils.py`. Toggle it per run with an env var:
-
-```bash
-DEBUG=1 uv run python 02_single_tool.py
-```
-
-In debug mode you see the full round trip as labeled blocks:
-
-```
-REQUEST           -> what we send to the model
-RESPONSE          -> what the model sends back (incl. tool_calls)
-TOOL EXECUTION    -> the function OUR code ran between model calls
-REQUEST / RESPONSE-> the follow-up call that uses the tool result
-```
-
-Key implementation lesson: Ollama returns **pydantic objects**, not plain
-dicts. Naively dumping them with `json.dumps(..., default=str)` collapses them
-into a flat `repr()` string that hides nested structure (like the `tool_calls`
-array inside the assistant message). The fix is a `default` hook that calls
-`model_dump(mode="json")` to expand them into real nested JSON.
-
----
-
-## 3. Reading Ollama's response metadata
+## 1. Reading Ollama's response metadata
 
 A non-streaming response ends with timing/token fields. Durations are in
 **nanoseconds** (divide by 1e9 for seconds).
@@ -109,7 +58,7 @@ The names come from llama.cpp: running tokens through the network is
 
 ---
 
-## 4. Forward pass, prefill, and decode
+## 2. Forward pass, prefill, and decode
 
 **Forward pass** = one execution of the model's math function: tokens in →
 flow through every layer → out comes a prediction for the **next** token (a
@@ -129,7 +78,7 @@ Generation therefore has two phases:
   feeding each new token back in, until it emits a stop token. Each token
   depends on the previous one, so this is **sequential** and slow per token.
 
-This explains the ~10× speed gap we measured:
+This explains the ~10× speed gap between the two phases:
 
 ```
 prefill: 61 tokens   in 0.139 s  ->  ~440 tok/s  (batched)
@@ -143,7 +92,7 @@ token and caches them. During decode, each new token reuses that cache instead
 of reprocessing the whole prompt every pass — turning what would be quadratic
 work into a one-time prefill cost.
 
-### Refined mental model
+### Mental model
 
 > Prefill ingests the whole prompt in one pass and emits the first token; then
 > each following forward pass appends one more token, reusing the KV cache,
@@ -157,13 +106,13 @@ tokens ≈ one decode pass.
 
 ---
 
-## 5. Statelessness: who resends the history?
+## 3. Statelessness: who resends the history?
 
 The model has **no memory**. Any "memory" you perceive is an illusion created
 by a client **resending the entire conversation** on every call.
 
-- In our scripts, *we* are that client: we maintain the `messages` list and
-  resend it each turn (see `01_chat_loop.py`).
+- In these scripts, the script *is* that client: it maintains the `messages`
+  list and resends it each turn (see `01_chat_loop.py`).
 - The Ollama **CLI** (`ollama run`) and **GUI** do the same thing for you —
   they keep an in-memory history for the session and resend it via the same
   stateless `/api/chat` endpoint. `ollama run` is essentially `01_chat_loop.py`.
@@ -182,7 +131,7 @@ This is also why hosted APIs (OpenAI, Anthropic, ...) charge for input tokens
 
 ---
 
-## 6. The tool-calling protocol
+## 4. The tool-calling protocol
 
 Tool calling is not magic — it's a structured contract. The model can never
 execute anything; it can only *ask*. Your code does the work.
@@ -199,7 +148,7 @@ The full cycle for one tool-using turn (two model calls):
 6. RESPONSE -> assistant message with the final text (tool_calls = null)
 ```
 
-Things that surprised me:
+Key points:
 
 - **`content` is empty on a tool-calling turn.** The model's entire output that
   turn *is* the `tool_calls`; the text answer only comes after it sees the
@@ -218,9 +167,83 @@ Things that surprised me:
 The protocol falls directly out of: *stateless model + client resends history +
 model can only ask, never do.*
 
+### How the `tools` schema reaches the model
+
+The `tools` array is a hand-written list, not something derived from your
+functions or registered with the model:
+
+- **Written by hand.** Each tool is a dict (`name`/`description`/`parameters`),
+  collected into one list (`TOOLS`). A separate `AVAILABLE_FUNCTIONS` dict maps
+  each `name` back to the real Python function.
+- **Sent via `tools=`.** `ollama.chat(messages=..., tools=TOOLS)` serializes it
+  into the request body. No kwarg, no tools — the model can't see them.
+- **Resent every call**, exactly like `messages`. The model keeps no memory of
+  the menu, so the whole schema rides along each turn (and counts toward
+  `prompt_eval_count`).
+
+### Schema = capability; prompt = policy
+
+It's tempting to think the system prompt is what "tells" the model about a tool.
+It isn't. Two different channels are at work:
+
+- The **`tools` schema** is the capability — the real registration (name,
+  parameters, JSON contract). ollama/llama.cpp renders it into the prompt as
+  tokens for you, usually injected into the system section by the model's chat
+  template.
+- A sentence like "you have a read_file tool, use it when…" is just **policy**:
+  a hint about *when* to reach for it.
+
+Easy to prove by dropping one side: keep `tools=` but delete the sentence and the
+model can still call the tool; keep the sentence but drop `tools=` and it can't —
+at best it hallucinates a call your code never receives.
+
+### Where tool policy belongs: system vs user
+
+That policy is a message you write, so where it goes matters — put it in the
+**system** message, not a user turn:
+
+| | System message | User message |
+|---|---|---|
+| Scope | Standing rule for the whole conversation | Tied to one turn |
+| Priority | Trained to outrank user instructions | Lower; a later user turn can override it |
+| Drift | Stays pinned at the top each turn | Blurs into the task and washes out over turns |
+
+That priority is a tendency from training, not a guarantee — small local models
+like `qwen3:8b` honor it less reliably than frontier ones, so the system prompt
+isn't a security boundary.
+
+### The menu can change per turn
+
+Since `tools` is resent every request, it doesn't have to stay the same. `02`/`03`
+send a constant `TOOLS` only for simplicity — the model knows nothing beyond the
+tools in the request it's looking at right now. Real harnesses lean on this:
+
+- **Context-dependent menus.** Offer `write_file`/`delete_file` only once the
+  user is in an edit mode, and hide them otherwise.
+- **Gate by state.** Don't expose `deploy()` until tests pass; add it to the
+  array only once that's true.
+- **Phased workflows.** A planning turn gets read-only tools; an execution turn
+  swaps in the mutating ones.
+- **Token savings.** Schemas count toward `prompt_eval_count` every turn, so
+  trimming the menu cuts input tokens — worth it once there are dozens of tools.
+- **Forcing behavior.** Send a single tool (or none) to steer toward a specific
+  action or force a plain-text answer.
+
+Two things to watch when the menu shifts:
+
+- **History references can dangle.** If turn 1 asked for `delete_file` and you
+  drop it from turn 2's menu, that call and its `role:"tool"` result still live
+  in `messages` and still feed back fine — the model just can't call it again.
+  Usually harmless, but yanking tools mid-flow can confuse weaker models, since
+  the history points at something no longer on offer.
+- **Keep the dispatch map in sync.** `AVAILABLE_FUNCTIONS` is what actually runs
+  a call. Anything advertised in `tools` should be runnable; anything the model
+  names that isn't in the map falls through to the `ERROR: unknown tool ...` text
+  result rather than crashing.
+
 ---
 
-## 7. Tool calls across LLM providers
+## 5. Tool calls across LLM providers
 
 The **concept is universal**: the tool call is part of the assistant turn, you
 execute it, and you feed the result back as a new message. Only the JSON
@@ -307,3 +330,180 @@ guard). Ollama often gives it already-parsed and omits the `id`.
 This per-provider divergence is exactly what frameworks like **Smolagents** and
 **LangGraph** (rungs `08`/`09`) normalize away — they're not magic, just
 adapters over this same assistant-message-owns-the-tool-call pattern.
+
+---
+
+## 6. Tool selection / routing with many tools
+
+With several tools (`03`), **routing is the model's job, not the harness's**.
+There is no `if "file" in user_input: read_file()`. Three tools (`read_file`,
+`list_dir`, `get_current_time`) are described, and the model decides — each
+turn — whether to use a tool, *which* one, and with what arguments.
+
+Key point:
+
+- **The dispatch loop does not change between `02` and `03`.** It already
+  iterates over `tool_calls` and looks each name up in a dict
+  (`AVAILABLE_FUNCTIONS`). Adding tools is "grow the menu" (function + schema
+  entry + one dict line); the plumbing is generic. The intelligence that grows
+  lives in the **model**, not the harness code.
+
+### Descriptions are the routing API
+
+With one tool there was nothing to confuse. With several, the **tool
+descriptions become the contract the model routes on.** `read_file` and
+`list_dir` both take a `path` and both touch the filesystem — the only thing
+that lets the model tell "read this file" from "what's in this folder" apart is
+the prose in `description`. Vague descriptions → mis-routing. So the
+`description` field is not documentation for humans; it's part of the model's
+decision input, sent on every call inside `tools`.
+
+### Two practical notes
+
+- **No-arg tools** still need a schema: `"parameters": {"type": "object",
+  "properties": {}}`. `get_current_time` also demonstrates a tool that needs
+  no user-supplied data at all — pure "the model can't know this itself."
+- **Correlating results** when several tools fire at once: the `role:"tool"`
+  message includes `name`. OpenAI/Ollama formally link a result to its call by
+  `tool_call_id` (see §5), but Ollama often omits the id, so including the tool
+  `name` helps the model match each result to what it asked for.
+
+### Mental model
+
+> One tool taught the *protocol* (how a call/result round works). Many tools
+> teach *routing* (the model choosing among options). The harness stays the
+> same generic loop; what changes is that the menu — and therefore the quality
+> of your descriptions — now decides how well the model performs.
+
+---
+
+## 7. Where tools run: custom vs built-in
+
+The ladder builds *custom* tools: you author the schema, the model asks, your
+code executes and feeds the result back. Real products also ship *built-in*
+tools (file search, web search, code interpreter). The contract never changes —
+the model can still only *ask*. What changes is **who sits on the "execute it
+and feed back the result" side of the loop.** That ownership gives three
+flavors:
+
+| | Who writes schema | Who executes | Who appends result | Example |
+|---|---|---|---|---|
+| Custom (client-side) | You | You | You | `read_file` in `02`/`03` |
+| Provider-defined, client-executed | Provider | You | You | Anthropic `text_editor` |
+| Built-in / hosted (server-side) | Provider | Provider | Provider (hidden) | OpenAI `web_search` |
+
+Ollama only supports the first row — there are no hosted tools locally, so every
+tool in this repo is a custom tool.
+
+### Concrete flow: provider-defined, client-executed
+
+Anthropic's `text_editor` tool shows the middle row in action. You declare it by
+*reference* — type + name, no `input_schema` — because the provider owns its
+shape and the model was trained on it:
+
+```json
+"tools": [ { "type": "text_editor_20250124", "name": "str_replace_editor" } ]
+```
+
+From there the loop is identical to §4 — the model just speaks a command
+vocabulary (`view`, `str_replace`, `create`, `insert`, …) that you never
+defined:
+
+1. User: "fix the typo in config.py".
+2. Model → `tool_use`: `{command: "view", path: "config.py"}`.
+3. **You** read the real local file, append a `tool_result` with its contents.
+4. Model → `tool_use`: `{command: "str_replace", old_str, new_str}`.
+5. **You** edit the real file, append `tool_result: "OK"`.
+6. Model → final text: "Fixed the typo."
+
+Steps 2–6 are the same ask → execute → feed-back loop as a custom tool. What
+differs:
+
+- **Schema ownership.** One-line declaration vs hand-authoring `input_schema`;
+  the provider owns the field/command names.
+- **Training alignment.** The model was post-trained on this exact shape, so it
+  emits valid calls far more reliably than against a tool you invented. That
+  reliability *is* the product.
+- **A vocabulary you must fully honor.** Your executor has to implement every
+  command the spec allows — the model can emit any of them; you don't pick the
+  set.
+
+The tell that execution is still *yours*: you see the `tool_use`/`tool_result`
+round-trip. With a hosted tool (row 3) those steps happen in the provider's
+sandbox and never appear in your code — you'd see only step 6.
+
+### What's different about built-in (server-side) tools
+
+The same loop still runs; it just runs **inside the provider's backend**, hidden
+from you:
+
+- **The round-trip collapses into one call from your side.** You enable
+  `web_search`; internally the server does ask → execute → feed result → answer,
+  and you get back the final assistant message (plus maybe citations). The
+  two-call dance from §4 still happens — you're just no longer the one doing it.
+- **Statelessness still holds underneath.** The provider resends history and
+  tool results across those internal hops exactly like the local scripts do; it's
+  just behind their endpoint, and you're billed for those hidden tokens.
+- **You trade control for convenience.** The sandbox, rate limits, and
+  implementation are theirs. Custom tools run wherever your code runs (local
+  files, your DB), and the provider only ever sees the string you hand back.
+
+### They mix, and "system tools" is overloaded
+
+One request can enable hosted built-ins *and* pass your own `tools`. The model
+routes across the combined menu (§6); for a built-in the server executes, for
+one of yours you get the `tool_calls` and execute it. The model can't tell them
+apart — both are just menu entries.
+
+Watch the naming: in a hosted API, "system tools" usually means the server-
+executed kind (row 3). But in a *harness/product* like Cursor, built-in
+`read_file` / `codebase_search` / terminal tools are "system" only in that the
+product ships them by default — mechanically they're still row 1 (the harness
+defines the schema and executes locally). "Built-in" can mean "the product
+wired it up," not "the model provider runs it."
+
+---
+
+## 8. The agent loop: looping until done
+
+Rungs `02`/`03` allow exactly **one** tool round per user turn: call the model,
+run whatever it asks for, call once more, print. That's fine for a single
+lookup, but it can't express tools that must run **in sequence**, where the next
+call depends on the previous result — e.g. "what's in the most recently named
+file in this folder?" needs `list_dir` first, *then* a `read_file` chosen from
+what that returned.
+
+The agent loop drops the round counting and loops on a **condition** instead:
+
+```
+keep (call model -> run requested tools -> feed results back)
+until the model returns a message with NO tool_calls.
+```
+
+The whole idea rests on one fact: **a message with no `tool_calls` is the
+model's "I'm done" signal.** As long as it keeps asking for tools, there's more
+work; the first turn it answers in plain text, the task is finished. That single
+rule turns a fixed exchange into an open-ended agent that chains as many steps
+as the task needs.
+
+### What changes from `03`
+
+- **Loop, not a fixed second call.** The two-call dance becomes
+  `for step in range(MAX_STEPS): call; if no tool_calls: break; run tools`.
+- **One append site.** The assistant message is appended after *every* model
+  call, tool-requesting or final — replacing `03`'s two separate append spots.
+  Each loop pass grows `messages` by the assistant turn plus any tool results,
+  and that growing history is what lets the model "remember" what it already did
+  this turn (statelessness, again — see §3).
+- **Termination needs a guard.** "No tool_calls" is the normal exit. But a
+  confused model can keep asking forever, so the loop is bounded by `MAX_STEPS`.
+  Hitting that bound is a *safety stop*, not success — making the loop genuinely
+  resilient (retries, bad arguments, tool exceptions) is rung `07`.
+
+### Why this is "the" agent loop
+
+Everything above this rung was setup; this is the part people mean by
+"agentic." A model that can call tools, see results, and decide its *next* call
+on its own — repeating until satisfied — is the core that frameworks dress up.
+Planning, multi-agent orchestration, and error recovery (later rungs) are all
+layered on top of this same `while not done` skeleton.
