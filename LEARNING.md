@@ -14,6 +14,7 @@ mode, and how to run scripts, see [`README.md`](./README.md).
 6. [Tool selection / routing with many tools](#6-tool-selection--routing-with-many-tools)
 7. [Where tools run: custom vs built-in](#7-where-tools-run-custom-vs-built-in)
 8. [The agent loop: looping until done](#8-the-agent-loop-looping-until-done)
+9. [Persistent memory across script runs](#9-persistent-memory-across-script-runs)
 
 ---
 
@@ -507,3 +508,137 @@ Everything above this rung was setup; this is the part people mean by
 on its own — repeating until satisfied — is the core that frameworks dress up.
 Planning, multi-agent orchestration, and error recovery (later rungs) are all
 layered on top of this same `while not done` skeleton.
+
+---
+
+## 9. Persistent memory across script runs
+
+Rungs `01`–`04` hold the entire conversation in a Python `messages` list that
+lives only in RAM. Quit the process and that list is discarded — the model
+appears to "forget," even though the weights never changed. The model was
+never remembering; the client was holding history and throwing it away on exit
+(see §3).
+
+Persistent memory is therefore **not** a model capability. It is the harness
+choosing to **save** the client-side `messages` list somewhere durable and
+**reload** it on the next run. In `05_persistent_memory.py` that store is a JSON
+file (`.agent_memory.json` by default); production systems use SQLite, Redis,
+vector databases, or hosted thread APIs — same idea, different backing store.
+
+### What changes from `04`
+
+Only two hooks, both around the list that already existed:
+
+```
+startup:  messages = fresh system prompt + conversation loaded from disk
+each turn: after the agent loop finishes, save the conversation to disk
+```
+
+The agent loop, tools, and termination rule are unchanged. Every API call is
+still stateless: the full message list is resent on each model call, exactly
+as before. Persistence only means the conversation survives a process restart
+instead of starting empty.
+
+### The system prompt is owned by code, not the file
+
+A subtlety worth getting right: persist the *conversation*, but re-inject the
+*system prompt* fresh on every run. On load, drop any saved `system` turn and
+prepend the current `DEFAULT_SYSTEM_MESSAGE`; on save, write everything except
+`system`.
+
+The naive version — save the whole list verbatim, including `messages[0]` —
+works, but it quietly makes the system prompt a one-time seed. The first run
+saves it to disk, and every later run loads that copy instead of the code's.
+Edit the prompt afterward and nothing changes until the file is deleted (the
+"stale system prompt" trap). Splitting ownership keeps the prompt authoritative
+in code while the conversation is the only thing that persists.
+
+### Mental model
+
+> The `messages` list is the only memory. RAM vs disk is an implementation
+> detail of where *you* keep that list between runs. Delete the file and
+> amnesia returns instantly — proof the model never stored anything.
+
+### Costs and trade-offs
+
+- **`prompt_eval_count` keeps growing** across sessions. Longer saved history
+  means more input tokens (and cost, on hosted APIs) every turn — persistence
+  is not free.
+- **No summarization yet.** This rung saves verbatim history. Very long
+  sessions eventually hit context limits; compaction and retrieval are separate
+  problems (later rungs / frameworks).
+
+### When to save: per turn vs. per message
+
+`05` saves once per completed user turn by rewriting the whole file. Simplest
+possible policy; two weaknesses at scale:
+
+- **Crash safety.** If the agent loop dies mid-turn (after several tool rounds
+  but before the final answer), nothing was written yet, so that work is lost.
+- **Write cost.** Rewriting the entire list each turn is O(n) and grows with the
+  conversation.
+
+Production systems instead **append each message the moment it exists** — user
+message before the model call, each tool call and result as they happen, the
+assistant reply on completion. This is O(1) per message (one row in a DB, not a
+full rewrite) and makes an agent *resumable*: a crash reloads partial progress
+instead of losing it. Writes usually go to a real store (Postgres, Redis,
+object storage), often async so saving never blocks the reply.
+
+One caution: re-running a tool to "refresh" is safe for **reads** (`read_file`)
+but dangerous for **actions** (`charge_card`, `deploy`) — those need idempotency
+keys so a retry doesn't fire the side effect twice.
+
+### Tool results go stale, and nothing notices
+
+A tool result is a `role:"tool"` string frozen into the history at the instant it
+ran — a snapshot, not a live view. The file gets edited on disk; the cached
+`read_file` result in `messages` does not change. Yet on resend it looks exactly
+as authoritative as a fresh one.
+
+The model cannot catch this, because of three facts that are easy to forget:
+
+- **No sense of time.** Everything in the context window reads as "now." A result
+  from 20 turns ago is indistinguishable from one from this turn.
+- **No sense of change.** History is an append-only log of past observations;
+  nothing rewrites an old result when the world moves on.
+- **No ground truth to check against.** The model sees only tokens, never the
+  world, so it has nothing to compare the snapshot to — and it states a stale
+  value as fluently as a live one. It doesn't get it wrong *and notice*; it
+  can't notice at all.
+
+So freshness is never the model's job — it's something the harness/platform must
+engineer: re-fetch volatile data instead of trusting history, stamp results with
+a timestamp, expire cached results with a TTL, track versions/ETags, or prune
+old results so they can't mislead. A system-prompt rule ("re-read before
+answering") nudges the model to re-call, but it's a tendency, not a guarantee.
+
+### Harness vs. platform
+
+These two words name different layers, and persistence/freshness split across
+both:
+
+- **Harness** = the agent loop itself: assemble `messages`, call the model, run
+  tools, feed results back, loop until done. Each `NN_*.py` script *is* a
+  harness; Smolagents/LangGraph (rungs `08`/`09`) are harness frameworks.
+- **Platform** = the infrastructure around it that runs harnesses as a service:
+  storage, auth, multi-user sessions, model serving, billing, monitoring.
+
+A platform runs one or more harnesses — so the harness is best seen as the
+specialized *agent-runtime* layer of a platform, while the rest is generic
+infrastructure any harness could plug into. (A harness can also run with no
+platform at all — that's exactly what these scripts are.)
+
+Mapped to this rung: deciding *whether to re-fetch*, pruning context, and the
+system-prompt policy are **harness** choices; the backing store, TTL caches, and
+version tracking are **platform** choices.
+
+### The big picture
+
+The model is a pure reasoning function over the tokens it's handed. It has no
+memory, no clock, and no window onto the world — every way it *seems* stateful or
+time-aware is scaffolding the harness bolted on: resending history (§3), saving
+it across runs (this rung), and re-grounding stale facts. The rest of the ladder
+— orchestration (`06`), resilience (`07`), frameworks (`08`/`09`) — is all
+answers to the same question: *how do we compensate for what the model
+fundamentally can't know on its own?*

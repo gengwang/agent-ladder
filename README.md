@@ -47,6 +47,7 @@ uv run python 01_chat_loop.py
 uv run python 02_single_tool.py
 uv run python 03_multi_tool.py
 uv run python 04_agent_loop.py
+uv run python 05_persistent_memory.py
 ```
 
 Or, with an activated venv:
@@ -56,6 +57,7 @@ python3 01_chat_loop.py
 python3 02_single_tool.py
 python3 03_multi_tool.py
 python3 04_agent_loop.py
+python3 05_persistent_memory.py
 ```
 
 ### Debug mode
@@ -109,14 +111,18 @@ before the answer:
 That's list_dir -> (model picks a file) -> read_file -> final answer, all
 driven by the loop, not a hardcoded second call.
 
+For 05, memory survives across runs. Tell it your name, type exit, start the
+script again, and ask "what's my name?" — the saved history is loaded and
+resent. Delete `.agent_memory.json` to reset.
+
 ## The ladder
 
 1. `01_chat_loop.py` -- plain chat, no tools. Statelessness.
 2. `02_single_tool.py` -- one tool (read_file). The tool-call protocol.
 3. `03_multi_tool.py` -- multiple tools. Tool selection/routing.
 4. `04_agent_loop.py` -- repeated tool calls until done. The real agent loop.
-5. `05_persistent_memory.py` -- state surviving across script runs. (next)
-6. `06_two_agents.py` -- one agent calling another. Orchestration.
+5. `05_persistent_memory.py` -- state surviving across script runs.
+6. `06_two_agents.py` -- one agent calling another. Orchestration. (next)
 7. `07_error_handling.py` -- making the loop resilient, not just functional.
 8. `08_smolagents_version.py` -- same task, rebuilt in Smolagents.
 9. `09_langgraph_version.py` -- same task, rebuilt in LangGraph.
