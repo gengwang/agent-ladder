@@ -14,3 +14,6 @@ wheels/
 
 # Session memory written by 05_persistent_memory.py
 .agent_memory.json
+
+# Long-term memory written by 06_two_agents.py
+.agent_notes.json

@@ -48,6 +48,7 @@ uv run python 02_single_tool.py
 uv run python 03_multi_tool.py
 uv run python 04_agent_loop.py
 uv run python 05_persistent_memory.py
+uv run python 06_two_agents.py
 ```
 
 Or, with an activated venv:
@@ -58,6 +59,7 @@ python3 02_single_tool.py
 python3 03_multi_tool.py
 python3 04_agent_loop.py
 python3 05_persistent_memory.py
+python3 06_two_agents.py
 ```
 
 ### Debug mode
@@ -73,6 +75,15 @@ DEBUG=1 uv run python 01_chat_loop.py
 ```
 
 Accepted truthy values: `1`, `true`, `yes` (case-insensitive).
+
+Tool calls are logged the moment the model asks for them, *before* they run, so
+the trace reads in true execution order. When a tool's body runs another agent
+(rung 06), its nested tool calls print indented underneath it:
+
+```
+  [tool call] ask_researcher({...})
+    [tool call] get_current_time({})
+```
 
 ### Quitting
 
@@ -115,6 +126,20 @@ For 05, memory survives across runs. Tell it your name, type exit, start the
 script again, and ask "what's my name?" — the saved history is loaded and
 resent. Delete `.agent_memory.json` to reset.
 
+For 06, the orchestrator delegates real-world lookups to a researcher sub-agent
+and keeps its own long-term memory. Ask something that needs the filesystem and
+watch the researcher's own `[tool call]` lines fire inside the `ask_researcher`
+call:
+  "how many files are in ~/Projects/agent-ladder, and what's in its README?"
+That's the orchestrator delegating -> the researcher running its own agent loop
+(separate context) -> returning just a summary the orchestrator synthesizes.
+
+To see the memory tools, tell it a fact and then ask for it back -- it saves with
+`remember` and looks up with `recall_memory` instead of searching the system:
+  "my name is Geng"        (-> remember)
+  "what's my name?"        (-> recall_memory)
+Memory persists to `.agent_notes.json`; delete that file to make it forget.
+
 ## The ladder
 
 1. `01_chat_loop.py` -- plain chat, no tools. Statelessness.
@@ -122,7 +147,7 @@ resent. Delete `.agent_memory.json` to reset.
 3. `03_multi_tool.py` -- multiple tools. Tool selection/routing.
 4. `04_agent_loop.py` -- repeated tool calls until done. The real agent loop.
 5. `05_persistent_memory.py` -- state surviving across script runs.
-6. `06_two_agents.py` -- one agent calling another. Orchestration. (next)
-7. `07_error_handling.py` -- making the loop resilient, not just functional.
+6. `06_two_agents.py` -- one agent calling another. Orchestration.
+7. `07_error_handling.py` -- making the loop resilient, not just functional. (next)
 8. `08_smolagents_version.py` -- same task, rebuilt in Smolagents.
 9. `09_langgraph_version.py` -- same task, rebuilt in LangGraph.

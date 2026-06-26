@@ -172,9 +172,10 @@ def main():
                     fn_args = json.loads(fn_args)
 
                 fn = AVAILABLE_FUNCTIONS.get(fn_name)
-                result = fn(**fn_args) if fn else f"ERROR: unknown tool {fn_name}"
-
-                debug_utils.tool_call(fn_name, fn_args, result)
+                with debug_utils.tool_call(fn_name, fn_args) as call:
+                    call.result = (
+                        fn(**fn_args) if fn else f"ERROR: unknown tool {fn_name}"
+                    )
 
                 # Feed the result back as a 'tool' message. We include `name`
                 # so that, with several tools in play, the model can correlate
@@ -183,7 +184,7 @@ def main():
                     {
                         "role": "tool",
                         "name": fn_name,
-                        "content": result,
+                        "content": call.result,
                     }
                 )
 

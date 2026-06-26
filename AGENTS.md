@@ -109,7 +109,8 @@ debug_utils.banner()                                    # at startup
 debug_utils.dump_request(MODEL, messages, tools=TOOLS)  # before a model call
 response = ollama.chat(...)
 debug_utils.dump_response(response)                     # after a model call
-debug_utils.tool_call(name, arguments, result)          # when YOUR code runs a tool
+with debug_utils.tool_call(name, arguments) as call:    # when YOUR code runs a tool
+    call.result = run_the_tool(arguments)               # logged before + after
 ```
 
 - Toggled by the `DEBUG` env var (`1`/`true`/`yes`), centralized as
@@ -117,8 +118,11 @@ debug_utils.tool_call(name, arguments, result)          # when YOUR code runs a 
 - The dump serializer expands pydantic objects (ollama's
   `ChatResponse`/`Message`/`ToolCall`) into nested JSON. New rich objects you
   want printed should serialize cleanly (expose `model_dump()` or pass dicts).
-- `dump_*` are no-ops unless `DEBUG` is on; `tool_call` always prints (compact
-  line when off, full labeled block when on).
+- `dump_*` are no-ops unless `DEBUG` is on. `tool_call` is a context manager: it
+  logs the call *before* the body runs and the result *after*, so nested
+  sub-agent calls (rung 06) print in true execution order, indented by depth.
+  The call line always prints (compact when off, labeled block when on); the
+  result block prints only when on.
 
 ### Style
 

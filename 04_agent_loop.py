@@ -141,11 +141,10 @@ def run_tool_calls(tool_calls):
             fn_args = json.loads(fn_args)
 
         fn = AVAILABLE_FUNCTIONS.get(fn_name)
-        result = fn(**fn_args) if fn else f"ERROR: unknown tool {fn_name}"
+        with debug_utils.tool_call(fn_name, fn_args) as call:
+            call.result = fn(**fn_args) if fn else f"ERROR: unknown tool {fn_name}"
 
-        debug_utils.tool_call(fn_name, fn_args, result)
-
-        yield {"role": "tool", "name": fn_name, "content": result}
+        yield {"role": "tool", "name": fn_name, "content": call.result}
 
 
 def main():

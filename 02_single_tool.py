@@ -114,18 +114,21 @@ def main():
                     fn_args = json.loads(fn_args)
 
                 fn = AVAILABLE_FUNCTIONS.get(fn_name)
-                result = fn(**fn_args) if fn else f"ERROR: unknown tool {fn_name}"
 
                 # The model only ASKED for this tool; OUR code actually runs it.
-                # In debug mode this prints as its own labeled block so the flow
-                # reads: RESPONSE (asks) -> TOOL EXECUTION (we run) -> REQUEST.
-                debug_utils.tool_call(fn_name, fn_args, result)
+                # Logged via a context manager so the call prints BEFORE we run
+                # it and (in debug mode) the result prints after, so the flow
+                # reads: RESPONSE (asks) -> TOOL CALL -> TOOL RESULT -> REQUEST.
+                with debug_utils.tool_call(fn_name, fn_args) as call:
+                    call.result = (
+                        fn(**fn_args) if fn else f"ERROR: unknown tool {fn_name}"
+                    )
 
                 # Feed the tool's result back in as a 'tool' role message.
                 messages.append(
                     {
                         "role": "tool",
-                        "content": result,
+                        "content": call.result,
                     }
                 )
 

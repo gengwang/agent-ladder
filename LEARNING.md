@@ -15,6 +15,7 @@ mode, and how to run scripts, see [`README.md`](./README.md).
 7. [Where tools run: custom vs built-in](#7-where-tools-run-custom-vs-built-in)
 8. [The agent loop: looping until done](#8-the-agent-loop-looping-until-done)
 9. [Persistent memory across script runs](#9-persistent-memory-across-script-runs)
+10. [Orchestration: one agent calling another](#10-orchestration-one-agent-calling-another)
 
 ---
 
@@ -559,6 +560,31 @@ in code while the conversation is the only thing that persists.
 > detail of where *you* keep that list between runs. Delete the file and
 > amnesia returns instantly — proof the model never stored anything.
 
+### Implicit vs. explicit memory
+
+This rung shows *implicit* memory: the **whole** conversation is saved and
+resent automatically, so the model "remembers" everything without choosing to.
+Simple and complete, but it grows unbounded and carries noise forever.
+
+The other style is *explicit*, tool-based memory: give the model a `remember`
+tool to save a fact and a `recall_memory` tool to look facts up, backed by a
+small store it controls. The model decides what is worth keeping and fetches it
+on demand. `06_two_agents.py` adds exactly this to its orchestrator, so asking
+"what's my name?" triggers a `recall_memory` lookup instead of resending the
+entire history (or, worse, scanning the filesystem for it).
+
+| | Implicit (this rung) | Explicit (tool-based) |
+|---|---|---|
+| What's stored | Entire conversation | Only facts the model saved |
+| Who decides | The harness (everything) | The model (selective) |
+| Cost over time | Grows with every turn | Stays small; fetched on demand |
+| Risk | Context bloat, noise | Model forgets to save/recall |
+
+Real systems combine both: recent turns kept verbatim (implicit) plus a curated
+long-term store the agent reads/writes by tool (explicit). They're the same core
+idea — memory is something the *harness* provides — differing only in *what* gets
+kept and *who* chooses.
+
 ### Costs and trade-offs
 
 - **`prompt_eval_count` keeps growing** across sessions. Longer saved history
@@ -642,3 +668,69 @@ it across runs (this rung), and re-grounding stale facts. The rest of the ladder
 — orchestration (`06`), resilience (`07`), frameworks (`08`/`09`) — is all
 answers to the same question: *how do we compensate for what the model
 fundamentally can't know on its own?*
+
+---
+
+## 10. Orchestration: one agent calling another
+
+Multi-agent systems sound like new machinery. They aren't. **A sub-agent is just
+a tool** (§4): the parent asks for it, your code runs it, the result comes back.
+The only difference from `read_file` is what the tool *does* — instead of
+reading a file, it runs a whole second agent loop and returns that agent's final
+text.
+
+In `06_two_agents.py` the orchestrator has **no** file tools; its only tool is
+`ask_researcher`. To answer anything about the filesystem it is forced to
+delegate. The researcher is rung `04`'s agent (the three file tools + the agent
+loop) wrapped in a function:
+
+```
+ask_researcher(question)  ->  run a full researcher loop  ->  return final text
+```
+
+The same `run_agent_loop` drives both agents unchanged — proof that an "agent"
+is just *(messages + tools + the loop)*, and stacking them is the whole trick.
+
+### The real idea: separate contexts
+
+The new concept is a **boundary**, not new control flow. Each agent owns its own
+`messages`:
+
+- The orchestrator keeps its conversation across user turns.
+- The researcher builds a **fresh** `messages` on every call and discards it
+  after returning.
+
+Neither sees the other's history. The researcher can't read the orchestrator's
+conversation; the orchestrator never sees the researcher's internal tool calls
+or reasoning — **only the final string it returns.** That isolation is the point:
+each agent works in a small, focused context instead of one giant shared
+transcript that mixes planning with raw tool output.
+
+### Consequence: delegation is communication, not shared memory
+
+Because the contexts are separate, the orchestrator must pack everything the
+worker needs **inside the question** — full paths, exactly what to find. The
+worker has no access to what the user said earlier. This is the same
+statelessness lesson (§3) at the agent level: nothing is shared unless it's
+explicitly passed across the boundary.
+
+It also shows up in the token math. Two agents means two independent context
+windows: the orchestrator's stays short (it only sees questions and summaries),
+while the researcher's balloons with tool output and then vanishes. Delegating
+keeps noisy, bulky work out of the coordinator's context — a feature, not just
+tidiness.
+
+### Why this is the seed of multi-agent systems
+
+Planner/worker, manager/specialists, supervisor graphs — they're all this one
+pattern: an agent whose tools happen to be other agents. Trade-offs to keep in
+mind:
+
+- **Cost multiplies.** Each sub-agent call is its own full loop (multiple model
+  calls). A delegated question can cost many times a direct answer.
+- **Information is lossy by design.** The parent gets a summary, not the raw
+  evidence. Good for focus; risky if the summary drops something the parent
+  needed — quality now hinges on the worker's final message.
+- **Errors cross the boundary as text.** A sub-agent failure comes back as a
+  string, not an exception; the orchestrator has to read and react to it
+  (resilience is rung `07`).

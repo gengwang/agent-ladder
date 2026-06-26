@@ -21,12 +21,17 @@ In debug mode you'll see the full round trip as labeled blocks:
 
     REQUEST            -> what we send to the model
     RESPONSE           -> what the model sends back (incl. tool_calls)
-    TOOL EXECUTION     -> the function YOUR code ran between model calls
+    TOOL CALL          -> a tool the model asked for, logged BEFORE we run it
+    TOOL RESULT        -> what that tool returned, logged after it finishes
     REQUEST / RESPONSE -> the follow-up call that uses the tool result
+
+Tool logging is depth-aware: a tool whose body runs ANOTHER agent (rung 06)
+prints its nested tool calls indented underneath it, in true execution order.
 """
 
 import json
 import os
+from contextlib import contextmanager
 
 from dotenv import load_dotenv
 
@@ -86,23 +91,69 @@ def dump_response(response):
     dump("RESPONSE", response)
 
 
-def tool_call(name, arguments, result):
-    """Show a LOCAL tool execution -- the step the model can't do itself.
+# How deeply nested the current tool call is. 0 = a tool called by the top-level
+# agent; 1 = a tool called by a sub-agent (rung 06), and so on. Used only to
+# indent/label output so nested traces read in natural order.
+_tool_depth = 0
+
+
+def _tool_indent():
+    # Base indent of two spaces (depth 0) matches every rung's original output;
+    # each nesting level adds two more.
+    return "  " * (_tool_depth + 1)
+
+
+def _depth_suffix():
+    return f" [depth {_tool_depth}]" if _tool_depth else ""
+
+
+class _ToolCall:
+    """Handle yielded by `tool_call`; set `.result` so it can be logged after."""
+
+    __slots__ = ("name", "result")
+
+    def __init__(self, name):
+        self.name = name
+        self.result = None
+
+
+@contextmanager
+def tool_call(name, arguments):
+    """Wrap a LOCAL tool execution -- the step the model can't do itself.
 
     The model only ASKED for this tool (see tool_calls in the RESPONSE above);
-    your script is what actually runs it. The result shown here is exactly what
-    gets fed back into the next REQUEST as a 'tool' message.
+    your script is what actually runs it. Used as a context manager so the call
+    is logged BEFORE the tool runs and the result AFTER -- which means a tool
+    whose body runs another agent (rung 06) shows its nested calls in true
+    execution order, indented underneath it:
 
-    Always prints (it's a real action, not just diagnostics): a full labeled
-    block in debug mode, or a one-line summary otherwise.
+        with debug_utils.tool_call(name, args) as call:
+            call.result = run_the_tool(args)
+
+    The call line always prints (compact when DEBUG is off, a labeled block when
+    on); the result prints as its own block only in debug mode. Depth is always
+    restored, even if the tool raises.
     """
+    global _tool_depth
     if DEBUG:
         _print_block(
-            "TOOL EXECUTION (local)",
-            {"name": name, "arguments": arguments, "result": result},
+            f"TOOL CALL (local){_depth_suffix()}",
+            {"name": name, "arguments": arguments},
         )
     else:
-        print(f"  [tool call] {name}({arguments})")
+        print(f"{_tool_indent()}[tool call] {name}({arguments})")
+
+    record = _ToolCall(name)
+    _tool_depth += 1
+    try:
+        yield record
+    finally:
+        _tool_depth -= 1
+        if DEBUG:
+            _print_block(
+                f"TOOL RESULT (local){_depth_suffix()}",
+                {"name": name, "result": record.result},
+            )
 
 
 def banner():
