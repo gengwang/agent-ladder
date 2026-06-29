@@ -49,6 +49,7 @@ uv run python 03_multi_tool.py
 uv run python 04_agent_loop.py
 uv run python 05_persistent_memory.py
 uv run python 06_two_agents.py
+uv run python 07_error_handling.py
 ```
 
 Or, with an activated venv:
@@ -60,6 +61,7 @@ python3 03_multi_tool.py
 python3 04_agent_loop.py
 python3 05_persistent_memory.py
 python3 06_two_agents.py
+python3 07_error_handling.py
 ```
 
 ### Debug mode
@@ -140,6 +142,19 @@ To see the memory tools, tell it a fact and then ask for it back -- it saves wit
   "what's my name?"        (-> recall_memory)
 Memory persists to `.agent_notes.json`; delete that file to make it forget.
 
+For 07, the loop survives things going wrong instead of crashing. Two ways to
+see it:
+  - Tool errors become results the model recovers from. Ask it to read a file
+    that doesn't exist:
+      "read ~/Projects/agent-ladder/nope.txt"
+    and watch the `ERROR ...` come back as the tool result, then the model
+    react to it rather than the script dying.
+  - Infrastructure errors retry, then degrade. Stop Ollama (`ollama stop` or
+    quit the app) and send any message: the model call retries with backoff and,
+    after `MAX_RETRIES`, the turn rolls back with a readable message while the
+    prompt stays alive. Ctrl-C mid-turn aborts just that turn; Ctrl-C/Ctrl-D at
+    the prompt quits cleanly.
+
 ## The ladder
 
 1. `01_chat_loop.py` -- plain chat, no tools. Statelessness.
@@ -148,6 +163,6 @@ Memory persists to `.agent_notes.json`; delete that file to make it forget.
 4. `04_agent_loop.py` -- repeated tool calls until done. The real agent loop.
 5. `05_persistent_memory.py` -- state surviving across script runs.
 6. `06_two_agents.py` -- one agent calling another. Orchestration.
-7. `07_error_handling.py` -- making the loop resilient, not just functional. (next)
-8. `08_smolagents_version.py` -- same task, rebuilt in Smolagents.
+7. `07_error_handling.py` -- making the loop resilient, not just functional.
+8. `08_smolagents_version.py` -- same task, rebuilt in Smolagents. (next)
 9. `09_langgraph_version.py` -- same task, rebuilt in LangGraph.

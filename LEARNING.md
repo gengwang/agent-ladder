@@ -16,6 +16,7 @@ mode, and how to run scripts, see [`README.md`](./README.md).
 8. [The agent loop: looping until done](#8-the-agent-loop-looping-until-done)
 9. [Persistent memory across script runs](#9-persistent-memory-across-script-runs)
 10. [Orchestration: one agent calling another](#10-orchestration-one-agent-calling-another)
+11. [Resilience: surviving failure in the loop](#11-resilience-surviving-failure-in-the-loop)
 
 ---
 
@@ -734,3 +735,76 @@ mind:
 - **Errors cross the boundary as text.** A sub-agent failure comes back as a
   string, not an exception; the orchestrator has to read and react to it
   (resilience is rung `07`).
+
+---
+
+## 11. Resilience: surviving failure in the loop
+
+Rungs `01`–`06` walk the happy path: the model call succeeds, the model emits
+well-formed tool calls, and every tool runs cleanly. A real loop gets none of
+those guarantees. Resilience is what separates a demo from an agent, and it
+turns on **sorting failures into two kinds** and handling each on its own terms.
+
+### Two kinds of failure
+
+| | Tool failure | Infrastructure failure |
+|---|---|---|
+| Examples | malformed JSON args, missing/extra field, wrong tool name, tool raises | Ollama down, timeout, dropped connection |
+| Can the model see it? | Yes — it produced the call | No — it never runs |
+| Who fixes it | The model (retry with fixed args, switch tool, give up gracefully) | The harness (retry with backoff) |
+| How | Feed the error back **as the tool result** | Retry N times, then end the turn |
+
+The insight is that a tool error is **information, not a crash.** Caught and
+returned as the `role:"tool"` content, an `ERROR: ...` string becomes something
+the model can read and react to — exactly like a normal result. An infrastructure
+error is the opposite: the model never sees the call, so retrying is the
+harness's job, and once retries are exhausted the only sane move is to abort the
+current turn while keeping the session alive.
+
+### Invariant 1: every `tool_call` gets a result
+
+The protocol pairs each call with a result (§4). If a tool throws and you let it
+escape, that call never gets its `role:"tool"` reply, and the next request is
+malformed — the model is left staring at a question it already "answered" with a
+call that has no outcome. So the dispatch wraps every invocation and *always*
+yields a result string, success or failure:
+
+```
+unknown tool   -> "ERROR: unknown tool 'x'. Available tools: ..."
+bad JSON args  -> "ERROR: arguments for 'x' were not valid JSON: ..."
+wrong shape    -> "ERROR: arguments for 'x' must be a JSON object ..."
+TypeError      -> "ERROR: bad arguments for 'x': ..."   (fn(**args) rejects it)
+tool raised    -> "ERROR: tool 'x' failed: <type>: ..."
+```
+
+`TypeError` is worth calling out: `fn(**args)` rejects wrong/missing/extra
+parameter names *before the tool body runs*, so catching it is how a model that
+guessed the wrong argument shape gets told the real signature.
+
+### Invariant 2: a failed turn must not corrupt history
+
+A turn that dies mid-flight (model unreachable on step 2, or the user hits
+Ctrl-C) can leave `messages` ending in an assistant turn whose `tool_calls` never
+got their results — a dangling call. Build the next request on that and the model
+is confused or the API errors. The fix is a **checkpoint and rollback**: record
+`len(messages)` before the turn, and on failure `del messages[checkpoint:]` to
+restore the last well-formed state. The user re-asks; the conversation stays
+clean.
+
+### Retries and graceful degradation
+
+Infrastructure errors get a bounded retry with exponential backoff
+(`0.5s → 1s → 2s`), because most are transient. Bounded matters: infinite retries
+just hang. After `MAX_RETRIES`, raise a typed `ModelUnavailable` so the turn
+handler can degrade gracefully — print a readable message, roll back, and return
+to the prompt — instead of dumping a traceback and dying. The REPL itself is
+hardened too: Ctrl-C/Ctrl-D at the prompt quits cleanly, and Ctrl-C *during* a
+turn aborts just that turn.
+
+### The mental model
+
+> Decide, per failure, whether the **model** or the **harness** is the one that
+> can fix it. Model-fixable errors go back into the conversation as results;
+> harness-fixable errors get retried then contained. Underneath both sits one
+> rule — keep `messages` well-formed at all times — because the loop's only
+> memory is that list, and a corrupted list poisons every turn after it.
